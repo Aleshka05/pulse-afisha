@@ -41,5 +41,16 @@ services:
     ports:
       - "3000:3000"
 
+  cloudflared:
+    image: cloudflare/cloudflared:latest
+    container_name: afisha_cloudflared
+    restart: unless-stopped
+    command: tunnel run
+    environment:
+      - TUNNEL_TOKEN=eyJhIjoiNmJjNzc5NzUwZmE1OGIwNTZjMjMyYjY4ZGQxN2I4ZTEiLCJ0IjoiNTA5ZmIyMmUtYzE2OS00NmYxLThkODctNGRkNTI3NmZiYWE5IiwicyI6Ik1UQTFZalJoT1dJdFptVXlOaTAwWldKaUxXRm1ORE10WW1NeU5ERmpORGcyTmpVMSJ9
+    # cloudflared в той же сети, что и frontend/backend
+    depends_on:
+      - frontend
+
 volumes:
   db_data:

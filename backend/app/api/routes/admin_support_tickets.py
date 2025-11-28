@@ -120,3 +120,24 @@ async def close_ticket(
     )
 
     return SupportTicketRead.model_validate(ticket)
+
+@router.delete("/{ticket_id}", status_code=status.HTTP_204_NO_CONTENT)
+async def delete_support_ticket(
+    ticket_id: int,
+    session: AsyncSession = Depends(get_session),
+) -> None:
+    """
+    Удаление обращения поддержки администратором.
+    """
+    stmt = select(SupportTicket).where(SupportTicket.id == ticket_id)
+    result = await session.execute(stmt)
+    ticket = result.scalar_one_or_none()
+
+    if ticket is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Обращение не найдено",
+        )
+
+    await session.delete(ticket)
+    await session.commit()

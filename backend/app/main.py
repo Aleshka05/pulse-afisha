@@ -22,10 +22,13 @@ app = FastAPI(
     title=settings.project_name,
     version="0.1.0",
 )
-
+origins = [
+    "http://localhost:3000",   # для локальной разработки
+    "https://pulse.of.by",     # фронт с боевого домена
+]
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=settings.backend_cors_origins,
+    allow_origins=origins,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],

@@ -37,6 +37,7 @@ async def update_me(
 
     if payload.preferences is not None:
         current_user.preferences = payload.preferences
+        
     session.add(current_user)
     await session.commit()
     await session.refresh(current_user)

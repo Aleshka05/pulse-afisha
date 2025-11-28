@@ -20,7 +20,7 @@ async def register_user(
     payload: UserCreate,
     session: AsyncSession = Depends(get_session),
 ) -> UserRead:
-    query = select(User).where(User.email == payload.email)
+    query = select(User).where(User.email == payload.email.strip().lower())
     result = await session.execute(query)
     existing_user = result.scalar_one_or_none()
 
@@ -48,7 +48,7 @@ async def login_user(
     form_data: OAuth2PasswordRequestForm = Depends(),
     session: AsyncSession = Depends(get_session),
 ) -> Token:
-    query = select(User).where(User.email == form_data.username)
+    query = select(User).where(User.email == form_data.username.strip().lower())
     result = await session.execute(query)
     user = result.scalar_one_or_none()
 

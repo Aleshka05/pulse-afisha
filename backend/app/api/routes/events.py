@@ -1,20 +1,18 @@
 from datetime import datetime
-
+import httpx
 from fastapi import APIRouter, Depends, HTTPException, Query, status
-from sqlalchemy import and_, or_, select
+from pydantic import BaseModel
+from sqlalchemy import and_, or_, select, func
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import selectinload
 
 from app.api.deps.auth import get_current_user, role_required
 from app.db.session import get_session
 from app.models.event import Event, EventCategory, EventStatus
 from app.models.user import User, UserRole
-from sqlalchemy.orm import selectinload
-from sqlalchemy import and_, or_, select, func, delete
 from app.models.event_rsvp import EventRSVP, RSVPStatus
 from app.schemas.rsvp import EventRSVPMutate, EventRSVPRead, EventRSVPStats
-
 from app.schemas.event import EventCreate, EventRead, EventUpdate, EventModerationAction
-
 
 router = APIRouter(
     prefix="/events",
@@ -52,7 +50,6 @@ async def list_events(
         conditions.append(Event.starts_at <= date_to)
 
     if q:
-        # упрощённый поиск по заголовку/описанию
         like = f"%{q}%"
         conditions.append(or_(Event.title.ilike(like), Event.description.ilike(like)))
 
@@ -79,6 +76,7 @@ async def list_events(
     events = result.scalars().unique().all()
     return [EventRead.model_validate(e) for e in events]
 
+
 @router.get("/my", response_model=list[EventRead])
 async def list_my_events(
     current_user: User = Depends(get_current_user),
@@ -88,7 +86,6 @@ async def list_my_events(
     """
     Список событий текущего пользователя (организатора).
 
-    Доступен любому авторизованному пользователю.
     По умолчанию не показывает архивные события.
     """
     conditions = [Event.organizer_id == current_user.id]
@@ -96,7 +93,6 @@ async def list_my_events(
     if status_filter is not None:
         conditions.append(Event.status == status_filter)
     else:
-        # по умолчанию скрываем архив
         conditions.append(Event.status != EventStatus.archived)
 
     stmt = (
@@ -117,18 +113,18 @@ async def get_event(
     session: AsyncSession = Depends(get_session),
 ) -> EventRead:
     """
-    Получение одного события по id.
+    Получение одного события по id (для публичного просмотра).
 
-    Для публичного просмотра: отдаём только опубликованные события.
+    Отдаём только опубликованные события.
     """
     stmt = (
-    select(Event)
-    .options(selectinload(Event.category))
-    .where(
-        Event.id == event_id,
-        Event.status == EventStatus.published,
+        select(Event)
+        .options(selectinload(Event.category))
+        .where(
+            Event.id == event_id,
+            Event.status == EventStatus.published,
+        )
     )
-)
     result = await session.execute(stmt)
     event = result.scalar_one_or_none()
 
@@ -139,6 +135,7 @@ async def get_event(
         )
 
     return EventRead.model_validate(event)
+
 
 @router.post(
     "/{event_id}/rsvp",
@@ -153,13 +150,7 @@ async def set_event_rsvp(
 ) -> EventRSVPRead:
     """
     Установка или изменение RSVP текущего пользователя на событие.
-
-    Статусы:
-    - going      — иду
-    - interested — интересно
-    - canceled   — отмена (по сути, пользователь передумал)
     """
-    # Проверяем, что событие существует и опубликовано
     stmt_event = select(Event).where(
         Event.id == event_id,
         Event.status == EventStatus.published,
@@ -172,9 +163,6 @@ async def set_event_rsvp(
             detail="Событие не найдено или не опубликовано",
         )
 
-    # На свои события тоже можно ставить RSVP, но смысла немного, оставляем как есть
-
-    # Ищем существующий отклик
     stmt_rsvp = select(EventRSVP).where(
         EventRSVP.user_id == current_user.id,
         EventRSVP.event_id == event_id,
@@ -197,6 +185,7 @@ async def set_event_rsvp(
     await session.refresh(rsvp)
 
     return EventRSVPRead.model_validate(rsvp)
+
 
 @router.get(
     "/{event_id}/rsvp/my",
@@ -221,6 +210,7 @@ async def get_my_event_rsvp(
         return None
 
     return EventRSVPRead.model_validate(rsvp)
+
 
 @router.get(
     "/{event_id}/rsvp/stats",
@@ -255,7 +245,8 @@ async def get_event_rsvp_stats(
         interested=counts[RSVPStatus.interested],
         canceled=counts[RSVPStatus.canceled],
     )
-    
+
+
 @router.get(
     "/{event_id}/rsvp/list",
     response_model=list[EventRSVPRead],
@@ -301,6 +292,60 @@ async def list_event_rsvps_for_organizer(
 
     return [EventRSVPRead.model_validate(r) for r in rsvps]
 
+
+class OrganizerEventStats(BaseModel):
+    event_id: int
+    going: int
+    interested: int
+    canceled: int
+
+
+@router.get(
+    "/rsvp/my-events-stats",
+    response_model=list[OrganizerEventStats],
+)
+async def get_my_events_rsvp_stats(
+    current_user: User = Depends(
+        role_required(UserRole.organizer, UserRole.admin)
+    ),
+    session: AsyncSession = Depends(get_session),
+) -> list[OrganizerEventStats]:
+    """
+    Агрегированная статистика RSVP по всем событиям организатора.
+    """
+    stmt = (
+        select(
+            EventRSVP.event_id,
+            EventRSVP.status,
+            func.count().label("cnt"),
+        )
+        .join(Event, Event.id == EventRSVP.event_id)
+        .where(Event.organizer_id == current_user.id)
+        .group_by(EventRSVP.event_id, EventRSVP.status)
+    )
+
+    res = await session.execute(stmt)
+    rows = res.all()
+
+    agg: dict[int, dict[RSVPStatus, int]] = {}
+    for event_id, status_value, cnt in rows:
+        per_event = agg.setdefault(event_id, {})
+        per_event[status_value] = cnt
+
+    stats: list[OrganizerEventStats] = []
+    for event_id, per_status in agg.items():
+        stats.append(
+            OrganizerEventStats(
+                event_id=event_id,
+                going=per_status.get(RSVPStatus.going, 0),
+                interested=per_status.get(RSVPStatus.interested, 0),
+                canceled=per_status.get(RSVPStatus.canceled, 0),
+            )
+        )
+
+    return stats
+
+
 @router.get("/{event_id}/manage", response_model=EventRead)
 async def get_event_for_manage(
     event_id: int,
@@ -337,6 +382,7 @@ async def get_event_for_manage(
 
     return EventRead.model_validate(event)
 
+
 @router.put("/{event_id}", response_model=EventRead)
 async def update_event(
     event_id: int,
@@ -349,8 +395,10 @@ async def update_event(
     """
     Обновление события.
 
-    Организатор может редактировать только свои события.
-    Обычно редактирование разрешено в статусах draft / rejected.
+    Организатор может редактировать свои события.  
+    Если событие было опубликовано, после изменений оно
+    снова отправляется на модерацию (pending_moderation),
+    ранее указанный комментарий модератора очищается.
     """
     stmt = select(Event).where(Event.id == event_id)
     result = await session.execute(stmt)
@@ -368,19 +416,24 @@ async def update_event(
             detail="Нельзя редактировать чужое событие",
         )
 
-    if event.status not in (EventStatus.draft, EventStatus.rejected) and current_user.role != UserRole.admin:
+    if (
+        current_user.role != UserRole.admin
+        and event.status == EventStatus.archived
+    ):
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Редактировать можно только черновики или отклонённые события",
+            detail="Архивные события нельзя редактировать",
         )
 
-    # Применяем изменения, если поля заданы
+    # запоминаем, было ли событие опубликовано до изменений
+    was_published = event.status == EventStatus.published
+
     if payload.title is not None:
         event.title = payload.title
     if payload.description is not None:
         event.description = payload.description
+
     if payload.category_id is not None:
-        # проверим, что категория существует
         cat_stmt = select(EventCategory).where(EventCategory.id == payload.category_id)
         cat_res = await session.execute(cat_stmt)
         if cat_res.scalar_one_or_none() is None:
@@ -413,10 +466,16 @@ async def update_event(
     if payload.capacity is not None:
         event.capacity = payload.capacity
 
+    # если это организатор и событие было опубликовано — отправляем на модерацию
+    if current_user.role != UserRole.admin and was_published:
+        event.status = EventStatus.pending_moderation
+        event.moderation_comment = None
+
     session.add(event)
     await session.commit()
     await session.refresh(event)
     return EventRead.model_validate(event)
+
 
 @router.delete("/{event_id}", status_code=status.HTTP_204_NO_CONTENT)
 async def delete_event(
@@ -430,7 +489,7 @@ async def delete_event(
     Удаление события.
 
     Организатор может удалять только свои события.
-    По умолчанию разрешаем удалять черновики и отклонённые события.
+    По умолчанию разрешаем удалять черновики, отклонённые и архивные события.
     Администратор может удалять любое событие.
     """
     stmt = select(Event).where(Event.id == event_id)
@@ -443,14 +502,12 @@ async def delete_event(
             detail="Событие не найдено",
         )
 
-    # Организатор — только свои
     if current_user.role != UserRole.admin and event.organizer_id != current_user.id:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="Нельзя удалять чужое событие",
         )
 
-    # Ограничение по статусу для организатора
     if (
         current_user.role != UserRole.admin
         and event.status not in (EventStatus.draft, EventStatus.rejected, EventStatus.archived)
@@ -462,6 +519,7 @@ async def delete_event(
 
     await session.delete(event)
     await session.commit()
+
 
 @router.post("/{event_id}/submit", response_model=EventRead)
 async def submit_event_for_moderation(
@@ -499,7 +557,7 @@ async def submit_event_for_moderation(
         )
 
     event.status = EventStatus.pending_moderation
-    event.moderation_comment = None  # очищаем старый комментарий
+    event.moderation_comment = None
 
     session.add(event)
     await session.commit()
@@ -524,7 +582,6 @@ async def create_event(
 
     По умолчанию создаём в статусе draft — публикация пойдёт через модерацию.
     """
-    # Проверим, что категория существует
     cat_stmt = select(EventCategory).where(EventCategory.id == payload.category_id)
     cat_res = await session.execute(cat_stmt)
     category = cat_res.scalar_one_or_none()
@@ -554,5 +611,26 @@ async def create_event(
     await session.refresh(event)
     return EventRead.model_validate(event)
 
+class ReverseGeocodeResponse(BaseModel):
+    address: str | None
+@router.get("/reverse-geocode", response_model=ReverseGeocodeResponse)
+async def reverse_geocode(
+    lat: float = Query(..., ge=-90, le=90),
+    lng: float = Query(..., ge=-180, le=180),
+) -> ReverseGeocodeResponse:
+    address: str | None = None
 
+    try:
+        async with httpx.AsyncClient(timeout=5) as client:
+            resp = await client.get(
+                "https://nominatim.openstreetmap.org/reverse",
+                params={"format": "jsonv2", "lat": lat, "lon": lng},
+                headers={"User-Agent": "pulse-afisha/1.0"},
+            )
+        resp.raise_for_status()
+        data = resp.json()
+        address = data.get("display_name")
+    except Exception:
+        address = None
 
+    return ReverseGeocodeResponse(address=address)

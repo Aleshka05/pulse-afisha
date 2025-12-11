@@ -76,7 +76,7 @@ async def reject_event(
     session: AsyncSession = Depends(get_session),
 ) -> EventRead:
     """
-    Отклонение события с комментарием.
+    Отклонение события с комментарием модератора.
     """
     stmt = select(Event).where(Event.id == event_id)
     result = await session.execute(stmt)
@@ -88,19 +88,31 @@ async def reject_event(
             detail="Событие не найдено",
         )
 
-    if event.status == EventStatus.rejected:
+    # Разрешаем отклонять только событие на модерации
+    if event.status != EventStatus.pending_moderation:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Событие уже отклонено",
+            detail="Можно отклонить только событие в статусе 'на модерации'",
         )
 
+    # Нормализуем комментарий
+    comment = (body.moderation_comment or "").strip()
+    if not comment:
+        comment = "Событие отклонено модератором"
+
     event.status = EventStatus.rejected
-    event.moderation_comment = body.moderation_comment
+    event.moderation_comment = comment
+
+    # если есть поле moderated_at в модели Event — можешь раскомментировать:
+    # from datetime import datetime as dt
+    # event.moderated_at = dt.utcnow()
 
     session.add(event)
     await session.commit()
     await session.refresh(event)
+
     return EventRead.model_validate(event)
+
 
 
 @router.delete("/{event_id}", status_code=status.HTTP_204_NO_CONTENT)

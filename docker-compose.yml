@@ -30,6 +30,11 @@ services:
       DB_USER: afisha
       DB_PASSWORD: afisha
       DB_NAME: afisha
+      SMTP_HOST: smtp.gmail.com
+      SMTP_PORT: "587"
+      SMTP_USER: "Savchuk017@gmail.com"       
+      SMTP_PASSWORD: "grku xvmf qpik vdei"
+      SMTP_FROM: "Pulse Afisha <your.gmail@gmail.com>"
     ports:
       - "8000:8000"
 

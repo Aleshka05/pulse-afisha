@@ -1,4 +1,4 @@
-from datetime import datetime
+from datetime import datetime, timezone
 
 from pydantic import BaseModel, Field, model_validator
 
@@ -20,12 +20,14 @@ class EventCategoryCreate(BaseModel):
     slug: str = Field(..., min_length=2, max_length=100)
     description: str | None = Field(default=None, max_length=500)
 
+
 class EventModerationAction(BaseModel):
     moderation_comment: str | None = Field(
         default=None,
         max_length=2000,
         description="Комментарий модератора (причина решения)",
     )
+
 
 class EventBase(BaseModel):
     title: str = Field(..., min_length=3, max_length=255)
@@ -46,9 +48,26 @@ class EventBase(BaseModel):
 
     @model_validator(mode="after")
     def check_dates(self) -> "EventBase":
-        """Проверка, что конец не раньше начала."""
+        """
+        Проверка:
+        - время окончания не раньше начала;
+        - событие не может начинаться в прошлом.
+        """
+        # конец не раньше начала
         if self.ends_at is not None and self.ends_at < self.starts_at:
             raise ValueError("Время окончания не может быть раньше начала")
+
+        # защита от создания событий в прошлом
+        # аккуратно работаем с наивными/aware датами
+        starts = self.starts_at
+        if starts.tzinfo is None:
+            now = datetime.utcnow()
+        else:
+            now = datetime.now(timezone.utc)
+
+        if starts < now:
+            raise ValueError("Нельзя создать событие в прошлом")
+
         return self
 
 
@@ -78,9 +97,23 @@ class EventUpdate(BaseModel):
 
     @model_validator(mode="after")
     def check_dates(self) -> "EventUpdate":
-        """Если оба времени заданы, проверяем порядок."""
+        """
+        Если оба времени заданы, проверяем порядок.
+        Если передан starts_at — не даём сдвинуть начало в прошлое.
+        """
         if self.starts_at and self.ends_at and self.ends_at < self.starts_at:
             raise ValueError("Время окончания не может быть раньше начала")
+
+        if self.starts_at is not None:
+            starts = self.starts_at
+            if starts.tzinfo is None:
+                now = datetime.utcnow()
+            else:
+                now = datetime.now(timezone.utc)
+
+            if starts < now:
+                raise ValueError("Нельзя перенести начало события в прошлое")
+
         return self
 
 
@@ -106,6 +139,9 @@ class EventRead(BaseModel):
     capacity: int | None
 
     created_at: datetime
+
+    # 🔹 вот это добавили — комментарий модератора попадёт во все ответы EventRead
+    moderation_comment: str | None = None
 
     class Config:
         from_attributes = True

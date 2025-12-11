@@ -3,7 +3,7 @@ from typing import List
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy import and_, desc, select
 from sqlalchemy.ext.asyncio import AsyncSession
-
+from pydantic import BaseModel, Field
 from app.api.deps.auth import role_required
 from app.db.session import get_session
 from app.loader import APP_LOGGER
@@ -17,7 +17,13 @@ router = APIRouter(
     dependencies=[Depends(role_required(UserRole.admin))],
 )
 
-
+class OrganizerRequestReject(BaseModel):
+    admin_comment: str = Field(
+        ...,
+        min_length=3,
+        max_length=2000,
+        description="Причина отклонения заявки, видимая пользователю",
+    )
 @router.get("/", response_model=List[OrganizerRequestRead])
 async def list_organizer_requests(
     session: AsyncSession = Depends(get_session),
@@ -108,17 +114,13 @@ async def approve_organizer_request(
 @router.post("/{request_id}/reject", response_model=OrganizerRequestRead)
 async def reject_organizer_request(
     request_id: int,
-    reason: str = Query(
-        default="Заявка отклонена администратором",
-        min_length=3,
-        max_length=2000,
-    ),
+    payload: OrganizerRequestReject,   # <-- вместо Query(reason)
     session: AsyncSession = Depends(get_session),
 ) -> OrganizerRequestRead:
     """
     Отклонение заявки на роль организатора.
 
-    Меняет статус на rejected и сохраняет причину.
+    Меняет статус на rejected и сохраняет причину из admin_comment.
     """
     stmt = select(OrganizerRequest).where(OrganizerRequest.id == request_id)
     result = await session.execute(stmt)
@@ -140,14 +142,14 @@ async def reject_organizer_request(
 
     req.status = OrganizerRequestStatus.rejected
     req.resolved_at = dt.utcnow()
-    req.admin_comment = reason.strip()
+    req.admin_comment = payload.admin_comment.strip()
 
     session.add(req)
     await session.commit()
     await session.refresh(req)
 
     APP_LOGGER.info(
-        f"[OrganizerRequest] rejected id={req.id}"
+        "[OrganizerRequest] rejected id=%s", req.id
     )
 
     return OrganizerRequestRead.model_validate(req)

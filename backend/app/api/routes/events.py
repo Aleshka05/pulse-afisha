@@ -150,6 +150,11 @@ async def set_event_rsvp(
 ) -> EventRSVPRead:
     """
     Установка или изменение RSVP текущего пользователя на событие.
+
+    Статусы:
+    - going      — иду
+    - interested — интересно
+    - canceled   — отмена
     """
     stmt_event = select(Event).where(
         Event.id == event_id,
@@ -163,6 +168,7 @@ async def set_event_rsvp(
             detail="Событие не найдено или не опубликовано",
         )
 
+    # существующий отклик
     stmt_rsvp = select(EventRSVP).where(
         EventRSVP.user_id == current_user.id,
         EventRSVP.event_id == event_id,
@@ -170,15 +176,39 @@ async def set_event_rsvp(
     res_rsvp = await session.execute(stmt_rsvp)
     rsvp = res_rsvp.scalar_one_or_none()
 
+    old_status = rsvp.status if rsvp is not None else None
+    new_status = payload.status
+
+    # --- проверка вместимости только для перехода в "going" ---
+    if (
+        new_status == RSVPStatus.going
+        and old_status != RSVPStatus.going
+        and event.capacity is not None
+        and event.capacity > 0
+    ):
+        stmt_count = select(func.count()).where(
+            EventRSVP.event_id == event_id,
+            EventRSVP.status == RSVPStatus.going,
+        )
+        current_going = await session.scalar(stmt_count) or 0
+
+        if current_going >= event.capacity:
+            # мест уже нет
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="На это событие уже нет свободных мест.",
+            )
+
+    # --- создаём / обновляем RSVP ---
     if rsvp is None:
         rsvp = EventRSVP(
             user_id=current_user.id,
             event_id=event_id,
-            status=payload.status,
+            status=new_status,
         )
         session.add(rsvp)
     else:
-        rsvp.status = payload.status
+        rsvp.status = new_status
         session.add(rsvp)
 
     await session.commit()
@@ -590,6 +620,23 @@ async def create_event(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Указанная категория не существует",
         )
+    if payload.ends_at is not None and payload.ends_at <= payload.starts_at:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Время окончания должно быть позже времени начала.",
+        )
+
+    if payload.capacity is not None and payload.capacity <= 0:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Вместимость должна быть положительным числом.",
+        )
+
+    if payload.price_from is not None and payload.price_from < 0:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Минимальная стоимость не может быть отрицательной.",
+        )
 
     event = Event(
         title=payload.title,
@@ -634,3 +681,18 @@ async def reverse_geocode(
         address = None
 
     return ReverseGeocodeResponse(address=address)
+
+@router.get("/reverse-geocode")
+async def reverse_geocode(
+    lat: float = Query(..., ge=-90, le=90),
+    lng: float = Query(..., ge=-180, le=180),
+) -> dict[str, str]:
+    """
+    Упрощённый reverse-geocode.
+
+    Пока без внешних API: просто формируем человекопонятную строку
+    по координатам, чтобы автоподстановка адреса работала.
+    При желании сюда потом можно прикрутить Яндекс/Google/Nominatim.
+    """
+    address = f"Точка на карте ({lat:.5f}, {lng:.5f})"
+    return {"address": address}

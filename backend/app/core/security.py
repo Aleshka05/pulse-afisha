@@ -1,5 +1,5 @@
-from datetime import datetime, timedelta
-from typing import Any
+from datetime import datetime, timedelta, timezone
+from typing import Any, Dict
 
 from jose import JWTError, jwt
 from passlib.context import CryptContext
@@ -37,3 +37,18 @@ def decode_token(token: str) -> dict[str, Any] | None:
         return payload
     except JWTError:
         return None
+
+def create_password_reset_token(user_id: int, expires_minutes: int = 30) -> str:
+    now = datetime.now(timezone.utc)
+    exp = now + timedelta(minutes=expires_minutes)
+    payload: Dict[str, Any] = {
+        "sub": str(user_id),
+        "scope": "password_reset",
+        "iat": int(now.timestamp()),
+        "exp": int(exp.timestamp()),
+    }
+    return jwt.encode(
+        payload,
+        settings.secret_key,        # у тебя уже должна быть эта настройка
+        algorithm=settings.algorithm,
+    )
